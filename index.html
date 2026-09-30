@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="theme-color" content="#1e3a8a">
+<title>Scanner Presensi Siswa</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,sans-serif;background:#0f172a;color:#fff}
+header{background:#1e3a8a;padding:10px 14px;display:flex;align-items:center;gap:8px}
+header b{flex:1;font-size:17px}
+header button{background:#ffffff26;color:#fff;border:0;border-radius:6px;padding:7px 10px;font-size:14px}
+.box{padding:14px;max-width:520px;margin:0 auto}
+label{display:block;margin:10px 0 3px;font-size:13px;color:#cbd5e1}
+input,select{width:100%;padding:11px;border-radius:8px;border:0;font-size:16px}
+.btn{width:100%;margin-top:14px;padding:13px;border:0;border-radius:8px;background:#22c55e;color:#052e16;font-size:17px;font-weight:bold}
+#reader{width:100%;background:#000;border-radius:10px;overflow:hidden}
+#res{margin-top:10px;padding:14px;border-radius:10px;text-align:center;background:#334155;min-height:88px;font-size:17px}
+#res b{display:block;font-size:24px}
+#res img{display:block;margin:0 auto 8px;width:130px;height:160px;object-fit:cover;border-radius:10px;border:3px solid #fff}
+#res.late{background:#ca8a04}
+#res.ok{background:#16a34a}#res.dup{background:#ca8a04}#res.err{background:#dc2626}#res.off{background:#2563eb}
+.info{display:flex;justify-content:space-between;margin-top:8px;font-size:14px;color:#cbd5e1}
+#man{display:flex;gap:6px;margin-top:10px}
+#man input{flex:1}#man button{padding:0 16px;border:0;border-radius:8px;background:#64748b;color:#fff;font-size:15px}
+.hide{display:none}
+</style>
+</head>
+<body>
+<header><b>Scanner Presensi</b><button onclick="showSet()">Pengaturan</button></header>
+
+<div id="set" class="box hide">
+ <label>URL Web App (Apps Script, berakhiran /exec)</label>
+ <input id="url" placeholder="https://script.google.com/macros/s/.../exec">
+ <label>Kode Guru</label>
+ <input id="kode" type="password" placeholder="Kode dari admin">
+ <label>Nama Guru</label>
+ <input id="guru" placeholder="Nama Anda">
+ <label>Status yang dicatat</label>
+ <select id="st"><option value="H">Hadir</option><option value="S">Sakit</option><option value="I">Izin</option></select>
+ <button class="btn" onclick="simpan()">Simpan &amp; Mulai Scan</button>
+ <p id="msg" style="font-size:13px;color:#fca5a5"></p>
+</div>
+
+<div id="app" class="box hide">
+ <div id="reader"></div>
+ <div id="res">Arahkan kamera ke barcode siswa</div>
+ <div class="info"><span id="cnt">Tercatat: 0</span><span id="q"></span></div>
+ <div id="man"><input id="nis" placeholder="Ketik NIS / pakai scanner USB" autocomplete="off"><button onclick="manual()">Kirim</button></div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const C=JSON.parse(localStorage.getItem('cfg')||'{}');
+let Q=JSON.parse(localStorage.getItem('antrian')||'[]'),count=0,scanner=null,last='',lastAt=0,lock=false,flushing=false;
+
+function showSet(){
+ if(scanner){scanner.stop().catch(()=>{});scanner=null}
+ $('url').value=C.url||'';$('kode').value=C.kode||'';$('guru').value=C.guru||'';$('st').value=C.st||'H';
+ $('set').classList.remove('hide');$('app').classList.add('hide');
+}
+async function simpan(){
+ const u=$('url').value.trim(),k=$('kode').value.trim(),g=$('guru').value.trim();
+ if(!u||!k||!g){$('msg').textContent='Semua kolom wajib diisi';return}
+ Object.assign(C,{url:u,kode:k,guru:g,st:$('st').value});
+ $('msg').textContent='Memeriksa koneksi...';
+ try{
+  const r=await post({action:'login'});
+  if(!r.ok){$('msg').textContent=r.msg||'Gagal masuk';return}
+ }catch(e){$('msg').textContent='Tidak bisa terhubung. Periksa URL Web App dan pastikan akses deployment "Anyone".';return}
+ localStorage.setItem('cfg',JSON.stringify(C));
+ $('msg').textContent='';mulai();
+}
+function mulai(){
+ $('set').classList.add('hide');$('app').classList.remove('hide');updQ();
+ scanner=new Html5Qrcode('reader',{formatsToSupport:[
+  Html5QrcodeSupportedFormats.CODE_128,Html5QrcodeSupportedFormats.CODE_39,
+  Html5QrcodeSupportedFormats.EAN_13,Html5QrcodeSupportedFormats.QR_CODE]});
+ scanner.start({facingMode:'environment'},{fps:12,qrbox:(w,h)=>({width:Math.floor(w*.85),height:Math.floor(h*.45)})},onCode)
+  .catch(e=>tampil('err','Kamera gagal ('+esc(String(e).slice(0,80))+'). Izinkan kamera lewat ikon gembok di address bar, pastikan alamat diawali https://, lalu muat ulang.'));
+ flush();
+}
+function beep(f,ms){try{const a=new (window.AudioContext||window.webkitAudioContext)(),o=a.createOscillator();o.frequency.value=f;o.connect(a.destination);o.start();setTimeout(()=>{o.stop();a.close()},ms)}catch(e){}}
+function foto(u){return (u&&/^https:\/\//.test(u))?'<img src="'+esc(u).replace(/"/g,'&quot;')+'" alt="">':''}
+function tampil(cls,html){$('res').className=cls;$('res').innerHTML=html}
+function updQ(){$('q').textContent=Q.length?('Antrian offline: '+Q.length):''}
+function saveQ(){localStorage.setItem('antrian',JSON.stringify(Q));updQ()}
+
+function onCode(txt){
+ const n=Date.now();
+ if(lock||(txt===last&&n-lastAt<3000))return;
+ last=txt;lastAt=n;kirim(txt);
+}
+function manual(){const v=$('nis').value.trim();$('nis').value='';if(v)kirim(v)}
+$('nis').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();manual()}});
+
+async function post(body){
+ const c=new AbortController(),t=setTimeout(()=>c.abort(),15000);
+ try{
+  const r=await fetch(C.url,{method:'POST',body:JSON.stringify(Object.assign({kode:C.kode},body)),signal:c.signal});
+  return await r.json();
+ }finally{clearTimeout(t)}
+}
+async function kirim(nis){
+ lock=true;
+ const item={nis:String(nis).trim(),st:C.st,guru:C.guru,waktu:new Date().toISOString()};
+ tampil('','Mengirim...');
+ try{
+  const r=await post(Object.assign({action:'scan'},item));
+  if(r.ok){count++;$('cnt').textContent='Tercatat: '+count;beep(900,120);if(navigator.vibrate)navigator.vibrate(60);
+   tampil(r.st==='T'?'late':'ok',foto(r.foto)+'<b>'+esc(r.nama)+'</b>'+esc(r.kelas)+' &bull; '+esc(r.jam)+' &bull; '+({H:'Hadir',T:'Terlambat',S:'Sakit',I:'Izin'}[r.st]||''));}
+  else if(r.dup){beep(500,200);tampil('dup',foto(r.foto)+'<b>'+esc(r.nama)+'</b>'+esc(r.msg));}
+  else{beep(200,400);if(navigator.vibrate)navigator.vibrate([100,60,100]);tampil('err',esc(r.msg||'Gagal'));}
+ }catch(e){
+  Q.push(item);saveQ();beep(600,150);
+  tampil('off','Tidak ada sinyal. Scan <b>'+esc(item.nis)+'</b> disimpan di antrian dan dikirim otomatis saat online.');
+ }
+ setTimeout(()=>{lock=false},1200);
+}
+async function flush(){
+ if(flushing||!Q.length||!C.url)return;
+ flushing=true;
+ try{
+  while(Q.length){
+   const r=await post(Object.assign({action:'scan'},Q[0]));
+   if(r.ok)count++;
+   Q.shift();saveQ();$('cnt').textContent='Tercatat: '+count;
+  }
+ }catch(e){}
+ flushing=false;
+}
+setInterval(flush,15000);
+window.addEventListener('online',flush);
+
+if(C.url&&C.kode&&C.guru)mulai();else showSet();
+</script>
+</body>
+</html>
